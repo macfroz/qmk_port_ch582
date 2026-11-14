@@ -68,7 +68,7 @@ led_config_t g_led_config = {
 /* clang-format on */
 
 static bool     embers_initialized = false;
-static uint8_t  ember_phase[RGB_MATRIX_LED_COUNT];
+static uint16_t ember_phase16[RGB_MATRIX_LED_COUNT];
 static uint8_t  ember_speed[RGB_MATRIX_LED_COUNT];
 static uint8_t  ember_peak[RGB_MATRIX_LED_COUNT];
 static uint16_t ignite_delay[RGB_MATRIX_LED_COUNT];
@@ -86,15 +86,12 @@ static uint8_t next_ember_rand(void) {
 static void init_ignite_delays(uint8_t anim_type) {
     for (uint8_t i = 0; i < RGB_MATRIX_LED_COUNT; i++) {
         if (anim_type == 1) {
-            // 1. Каскадный розжиг (Cascade Ignition)
             uint8_t r       = next_ember_rand();
             ignite_delay[i] = ((uint32_t)r * r * 1700UL) / 65025UL;
         } else if (anim_type == 2) {
-            // 2. Световая волна слева направо (Scanner Wave)
             uint8_t x       = (i < 64) ? g_led_config.point[i].x : ((i - 64) * 12);
             ignite_delay[i] = ((uint32_t)x * 1600UL) / 224UL;
         } else if (anim_type == 3) {
-            // 3. Сверхновая из центра (Center Supernova)
             int16_t dx      = (i < 64) ? ((int16_t)g_led_config.point[i].x - 112) : 112;
             int16_t dy      = (i < 64) ? (((int16_t)g_led_config.point[i].y - 32) * 2) : 64;
             if (dx < 0) dx = -dx;
@@ -103,7 +100,6 @@ static void init_ignite_delays(uint8_t anim_type) {
             if (dist > 180) dist = 180;
             ignite_delay[i] = ((uint32_t)dist * 1600UL) / 180UL;
         } else if (anim_type == 4) {
-            // 4. Заполнение по рядам сверху вниз (Matrix Fill)
             uint8_t x       = (i < 64) ? g_led_config.point[i].x : 224;
             uint8_t y       = (i < 64) ? g_led_config.point[i].y : 64;
             uint16_t pos    = ((uint16_t)(y / 16) * 240u) + x;
@@ -122,12 +118,6 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
     uint8_t mode = rgb_matrix_get_mode();
 
     if (mode == 1 || mode >= 30) {
-        // Определяем тип анимации загрузки по выбранному пункту в VIA:
-        // 40 = Без анимации загрузки
-        // 1 или 41 = Каскадный розжиг
-        // 42 = Световая волна слева направо
-        // 43 = Сверхновая из центра
-        // 44 = Заполнение матрицы по рядам
         uint8_t target_boot = 1;
         if (mode == 40) target_boot = 0;
         else if (mode == 41) target_boot = 1;
@@ -137,10 +127,9 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 
         if (!embers_initialized) {
             for (uint8_t i = 0; i < RGB_MATRIX_LED_COUNT; i++) {
-                ember_phase[i] = next_ember_rand();
-                // Скорость каждого уголька 1 или 2 (плавное, неспешное тление)
-                ember_speed[i] = (next_ember_rand() < 145) ? ((next_ember_rand() & 1u) + 1u) : 0;
-                ember_peak[i]  = 110 + (next_ember_rand() % 146);
+                ember_phase16[i] = ((uint16_t)next_ember_rand() << 8) | next_ember_rand();
+                ember_speed[i]   = (next_ember_rand() < 140) ? ((next_ember_rand() % 3) + 1) : 0;
+                ember_peak[i]    = 100 + (next_ember_rand() % 156);
             }
             boot_anim_type     = target_boot;
             init_ignite_delays(boot_anim_type);
@@ -149,7 +138,6 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
             last_seen_mode     = mode;
             embers_initialized = true;
         } else if (mode != last_seen_mode) {
-            // Если вы переключили вариант загрузки в VIA — сразу показываем его!
             last_seen_mode  = mode;
             boot_anim_type  = target_boot;
             init_ignite_delays(boot_anim_type);
@@ -158,42 +146,42 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 
         uint32_t boot_elapsed = timer_elapsed32(boot_start_time);
 
-        // Замедлили минимальный шаг таймера:
-        // При speed = 0 задержка = 75 мс (очень медленное, плавное дыхание углей)
-        // При speed = 255 задержка = 12 мс (быстрое мерцание)
-        uint16_t delay = ((uint16_t)(255 - rgb_matrix_config.speed) / 4) + 12;
-        if (timer_elapsed(last_ember_tick) > delay) {
+        // Обновляем кадры каждые 15 мс (66 кадров в секунду — никаких рывков!)
+        if (timer_elapsed(last_ember_tick) >= 15) {
             last_ember_tick = timer_read();
+
+            // При speed = 0 множитель = 36 (в 2 раза медленнее той самой версии, но при 66 FPS!)
+            // При увеличении ползунка Effect Speed плавно ускоряется
+            uint16_t speed_mult = 36 + ((uint16_t)rgb_matrix_config.speed >> 1);
 
             for (uint8_t k = 0; k < RGB_MATRIX_LED_COUNT; k++) {
                 if (ember_speed[k] > 0) {
-                    uint8_t old_p = ember_phase[k];
-                    ember_phase[k] += ember_speed[k];
+                    uint16_t old_p = ember_phase16[k];
+                    ember_phase16[k] += (uint16_t)ember_speed[k] * speed_mult;
 
-                    if (ember_phase[k] < old_p) {
-                        ember_phase[k] = 0;
-                        if (next_ember_rand() < 135) {
-                            ember_speed[k] = (next_ember_rand() & 1u) + 1u;
-                            ember_peak[k]  = 110 + (next_ember_rand() % 146);
+                    if (ember_phase16[k] < old_p) {
+                        ember_phase16[k] = 0;
+                        if (next_ember_rand() < 128) {
+                            ember_speed[k] = (next_ember_rand() % 3) + 1;
+                            ember_peak[k]  = 100 + (next_ember_rand() % 156);
                         } else {
                             ember_speed[k] = 0;
                         }
                     }
                 } else {
-                    if (next_ember_rand() < 6) {
-                        ember_phase[k] = 0;
-                        ember_speed[k] = (next_ember_rand() & 1u) + 1u;
-                        ember_peak[k]  = 110 + (next_ember_rand() % 146);
+                    if (next_ember_rand() < 3) {
+                        ember_phase16[k] = 0;
+                        ember_speed[k]   = (next_ember_rand() % 3) + 1;
+                        ember_peak[k]    = 100 + (next_ember_rand() % 156);
                     }
                 }
             }
         }
 
-        uint8_t max_val = rgb_matrix_config.hsv.v;
+        // Расширяем динамический диапазон яркости в 3 раза (до 96 ступеней вместо 32) для шелковистой плавности!
+        uint16_t max_val = (uint16_t)rgb_matrix_config.hsv.v * 3u;
+        if (max_val > 120u) max_val = 120u;
 
-        // Вычисляем чистый цвет на полной точности 255!
-        // Если точка в палитре VIA опущена в белую зону (s < 32, как ваш #ffefee),
-        // принудительно делаем s = 0, чтобы на низкой яркости НИКОГДА не вылезал красный цвет!
         HSV full_hsv = rgb_matrix_config.hsv;
         if (full_hsv.s < 32) {
             full_hsv.s = 0;
@@ -202,16 +190,15 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
         RGB pure_color = hsv_to_rgb(full_hsv);
 
         for (uint8_t i = led_min; i < led_max; i++) {
-            uint8_t ember_val = 0;
+            uint8_t scaled = 0;
             if (ember_speed[i] > 0) {
-                uint8_t p      = ember_phase[i];
-                uint8_t tri    = (p & 0x80) ? (255 - ((p & 0x7F) << 1)) : ((p & 0x7F) << 1);
-                // Та самая плавная кривая, которая вам понравилась!
-                uint8_t smooth = (uint8_t)(((uint16_t)tri * tri) >> 8);
-                ember_val      = (uint8_t)(((uint16_t)smooth * ember_peak[i]) >> 8);
+                // Точно та же формула яркости из вашей любимой версии, но с 16-битной точностью!
+                uint16_t tri16  = (ember_phase16[i] & 0x8000u) ? ((65535u - ember_phase16[i]) >> 7) : (ember_phase16[i] >> 7);
+                uint16_t smooth = (tri16 * tri16) >> 8;
+                scaled          = (uint8_t)((smooth * ember_peak[i]) >> 8);
             }
 
-            uint8_t final_intensity = ember_val;
+            uint8_t final_intensity = scaled;
 
             if (boot_anim_type > 0 && boot_elapsed < 3200) {
                 if (boot_elapsed < 2300) {
@@ -219,26 +206,24 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
                         final_intensity = 0;
                     } else {
                         uint32_t t_on = boot_elapsed - ignite_delay[i];
-                        if (t_on < 480) {
-                            uint8_t ramp    = (uint8_t)((t_on * 255UL) / 480UL);
+                        if (t_on < 450) {
+                            uint8_t ramp    = (uint8_t)((t_on * 255UL) / 450UL);
                             final_intensity = (uint8_t)(((uint16_t)ramp * ramp) >> 8);
                         } else {
                             final_intensity = 255;
                         }
                     }
                 } else {
-                    uint32_t fade_t  = boot_elapsed - 2300; // 0..900 мс
+                    uint32_t fade_t  = boot_elapsed - 2300;
                     uint8_t  ember_w = (uint8_t)((fade_t * 255UL) / 900UL);
                     uint8_t  boot_w  = 255 - ember_w;
-                    final_intensity  = (uint8_t)(((uint16_t)255 * boot_w + (uint16_t)ember_val * ember_w) >> 8);
+                    final_intensity  = (uint8_t)(((uint16_t)255 * boot_w + (uint16_t)scaled * ember_w) >> 8);
                 }
             }
 
-            // Масштабируем общую яркость один раз в самом конце:
             uint8_t level = (uint8_t)(((uint16_t)final_intensity * max_val) >> 8);
 
             if (full_hsv.s == 0) {
-                // Идеально чистый белый цвет (без малейшей примеси красного на минимальной яркости!)
                 rgb_matrix_set_color(i, level, level, level);
             } else {
                 uint8_t r = (uint8_t)(((uint16_t)pure_color.r * level) >> 8);
