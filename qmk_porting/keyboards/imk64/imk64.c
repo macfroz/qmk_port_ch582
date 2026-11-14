@@ -136,7 +136,7 @@ static void init_ignite_delays(uint8_t anim_type) {
 
 #ifdef VIA_ENABLE
 // Обработчик кастомного пункта меню "Boot Animation" в VIA (канал 0, ID 1)
-void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
+void via_custom_value_command_user(uint8_t *data, uint8_t length) {
     uint8_t *command_id        = &(data[0]);
     uint8_t *channel_id        = &(data[1]);
     uint8_t *value_id_and_data = &(data[2]);
@@ -149,7 +149,7 @@ void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
             init_ignite_delays(boot_anim_type);
             boot_start_time = timer_read32();
             // Сохраняем выбранный тип загрузки в верхние биты байта flags в EEPROM
-            rgb_matrix_config.flags = (rgb_matrix_config.flags & 0x0Fu) | ((boot_anim_type & 0x07u) << 4);
+            rgb_matrix_config.flags = (rgb_matrix_config.flags & 0x0Fu) | 0x80u | ((boot_anim_type & 0x07u) << 4);
         } else if (*command_id == id_custom_get_value) {
             value_id_and_data[1] = boot_anim_type;
         } else if (*command_id == id_custom_save) {
@@ -167,7 +167,7 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 
     if (mode == 1 || mode >= 30) {
         if (!embers_initialized) {
-            // Читаем сохранённый в EEPROM тип анимации загрузки (если он был сохранён)
+            // Читаем сохранённый в EEPROM тип анимации загрузки
             uint8_t saved_boot = (rgb_matrix_config.flags >> 4) & 0x07u;
             if (saved_boot <= 4 && (rgb_matrix_config.flags & 0x80u)) {
                 boot_anim_type = saved_boot;
@@ -178,7 +178,6 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 
             for (uint8_t i = 0; i < RGB_MATRIX_LED_COUNT; i++) {
                 ember_phase16[i] = ((uint16_t)next_ember_rand() << 8) | next_ember_rand();
-                // Сделали скорость каждого уголька от 1 до 3 (намного медленнее и спокойнее!)
                 ember_speed[i]   = (next_ember_rand() < 145) ? ((next_ember_rand() % 3) + 1) : 0;
                 ember_peak[i]    = 110 + (next_ember_rand() % 146);
             }
@@ -195,8 +194,6 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
             last_ember_tick = timer_read();
             if (dt > 50) dt = 50;
 
-            // Теперь на минимальной скорости (speed = 0) шаг всего 1 (в 8 раз медленнее прежнего!)
-            // Полный цикл одного уголька на минимуме длится ~14 секунд!
             uint16_t speed_scale = 1 + (rgb_matrix_config.speed >> 4);
 
             for (uint8_t k = 0; k < RGB_MATRIX_LED_COUNT; k++) {
@@ -235,7 +232,6 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 
             uint8_t final_intensity = ember_val;
 
-            // Если анимация загрузки включена (boot_anim_type > 0) и идут первые 3.2 секунды
             if (boot_anim_type > 0 && boot_elapsed < 3200) {
                 if (boot_elapsed < 2300) {
                     if (boot_elapsed < ignite_delay[i]) {
