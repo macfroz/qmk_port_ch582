@@ -76,12 +76,20 @@ static uint16_t last_ember_tick = 0;
 static uint32_t boot_start_time = 0;
 static uint16_t ember_rng       = 0xACE1u;
 
+// Тип анимации загрузки:
+// 0 = Выключено (сразу тлеющие угли)
+// 1 = Каскадный розжиг (Cascade Ignition)
+// 2 = Световая волна слева направо (Scanner Wave)
+// 3 = Сверхновая из центра (Center Supernova)
+// 4 = Заполнение матрицы сверху вниз (Matrix Fill)
+static uint8_t boot_anim_type = 1;
+
 static uint8_t next_ember_rand(void) {
     ember_rng = (ember_rng >> 1) ^ (-(ember_rng & 1u) & 0xB400u);
     return (uint8_t)(ember_rng & 0xFFu);
 }
 
-// Ультра-плавная S-кривая (Smoothstep + Gamma) из 16-битной фазы (0..65535 -> 0..255 -> 0)
+// Ультра-плавная S-кривая (Smoothstep + Gamma) из 16-битной фазы
 static uint8_t calc_smooth_ember(uint16_t phase16, uint8_t peak) {
     uint16_t half   = (phase16 & 0x8000u) ? (65535u - phase16) : phase16;
     uint16_t x      = half >> 7; // 0..255
@@ -92,21 +100,89 @@ static uint8_t calc_smooth_ember(uint16_t phase16, uint8_t peak) {
     return (uint8_t)((gamma * peak) >> 8);
 }
 
+static void init_ignite_delays(uint8_t anim_type) {
+    for (uint8_t i = 0; i < RGB_MATRIX_LED_COUNT; i++) {
+        if (anim_type == 1) {
+            // 1. Каскадный розжиг (случайная лавина с ускорением)
+            uint8_t r       = next_ember_rand();
+            ignite_delay[i] = ((uint32_t)r * r * 1700UL) / 65025UL;
+        } else if (anim_type == 2) {
+            // 2. Волна слева направо (по координате X от 0 до 224)
+            uint8_t x       = (i < 64) ? g_led_config.point[i].x : ((i - 64) * 12);
+            ignite_delay[i] = ((uint32_t)x * 1600UL) / 224UL;
+        } else if (anim_type == 3) {
+            // 3. Сверхновая из центра (расстояние от центра платы X=112, Y=32)
+            int16_t dx      = (i < 64) ? ((int16_t)g_led_config.point[i].x - 112) : 112;
+            int16_t dy      = (i < 64) ? (((int16_t)g_led_config.point[i].y - 32) * 2) : 64;
+            if (dx < 0) dx = -dx;
+            if (dy < 0) dy = -dy;
+            uint16_t dist   = (uint16_t)(dx + dy);
+            if (dist > 180) dist = 180;
+            ignite_delay[i] = ((uint32_t)dist * 1600UL) / 180UL;
+        } else if (anim_type == 4) {
+            // 4. Построчное заполнение (сверху вниз, слева направо)
+            uint8_t x       = (i < 64) ? g_led_config.point[i].x : 224;
+            uint8_t y       = (i < 64) ? g_led_config.point[i].y : 64;
+            uint16_t pos    = ((uint16_t)(y / 16) * 240u) + x;
+            ignite_delay[i] = ((uint32_t)pos * 1700UL) / 1200UL;
+        } else {
+            ignite_delay[i] = 0;
+        }
+    }
+    if (anim_type == 1) {
+        ignite_delay[33] = 0; // Первая искра в центре для каскада
+    }
+}
+
+#ifdef VIA_ENABLE
+// Обработчик кастомного пункта меню "Boot Animation" в VIA (канал 0, ID 1)
+void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
+    uint8_t *command_id        = &(data[0]);
+    uint8_t *channel_id        = &(data[1]);
+    uint8_t *value_id_and_data = &(data[2]);
+
+    if (*channel_id == 0 && value_id_and_data[0] == 1) {
+        if (*command_id == id_custom_set_value) {
+            boot_anim_type = value_id_and_data[1];
+            if (boot_anim_type > 4) boot_anim_type = 0;
+            // Сразу перезапускаем анимацию загрузки, чтобы увидеть её вживую!
+            init_ignite_delays(boot_anim_type);
+            boot_start_time = timer_read32();
+            // Сохраняем выбранный тип загрузки в верхние биты байта flags в EEPROM
+            rgb_matrix_config.flags = (rgb_matrix_config.flags & 0x0Fu) | ((boot_anim_type & 0x07u) << 4);
+        } else if (*command_id == id_custom_get_value) {
+            value_id_and_data[1] = boot_anim_type;
+        } else if (*command_id == id_custom_save) {
+            eeconfig_update_rgb_matrix();
+        }
+        return;
+    }
+    *command_id = id_unhandled;
+}
+#endif
+
 bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 {
     uint8_t mode = rgb_matrix_get_mode();
 
     if (mode == 1 || mode >= 30) {
         if (!embers_initialized) {
+            // Читаем сохранённый в EEPROM тип анимации загрузки (если он был сохранён)
+            uint8_t saved_boot = (rgb_matrix_config.flags >> 4) & 0x07u;
+            if (saved_boot <= 4 && (rgb_matrix_config.flags & 0x80u)) {
+                boot_anim_type = saved_boot;
+            } else {
+                boot_anim_type = 1; // По умолчанию "Каскадный розжиг"
+                rgb_matrix_config.flags |= 0x80u | (1u << 4);
+            }
+
             for (uint8_t i = 0; i < RGB_MATRIX_LED_COUNT; i++) {
                 ember_phase16[i] = ((uint16_t)next_ember_rand() << 8) | next_ember_rand();
-                ember_speed[i]   = (next_ember_rand() < 145) ? ((next_ember_rand() % 4) + 2) : 0;
+                // Сделали скорость каждого уголька от 1 до 3 (намного медленнее и спокойнее!)
+                ember_speed[i]   = (next_ember_rand() < 145) ? ((next_ember_rand() % 3) + 1) : 0;
                 ember_peak[i]    = 110 + (next_ember_rand() % 146);
-
-                uint8_t r        = next_ember_rand();
-                ignite_delay[i]  = ((uint32_t)r * r * 1700UL) / 65025UL;
             }
-            ignite_delay[33]   = 0;
+            init_ignite_delays(boot_anim_type);
             last_ember_tick    = timer_read();
             boot_start_time    = timer_read32();
             embers_initialized = true;
@@ -115,38 +191,40 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
         uint32_t boot_elapsed = timer_elapsed32(boot_start_time);
 
         uint16_t dt = timer_elapsed(last_ember_tick);
-        if (dt >= 4) {
+        if (dt >= 8) {
             last_ember_tick = timer_read();
             if (dt > 50) dt = 50;
 
-            uint16_t speed_scale = 6 + (rgb_matrix_config.speed >> 3);
+            // Теперь на минимальной скорости (speed = 0) шаг всего 1 (в 8 раз медленнее прежнего!)
+            // Полный цикл одного уголька на минимуме длится ~14 секунд!
+            uint16_t speed_scale = 1 + (rgb_matrix_config.speed >> 4);
 
             for (uint8_t k = 0; k < RGB_MATRIX_LED_COUNT; k++) {
                 if (ember_speed[k] > 0) {
                     uint16_t old_p = ember_phase16[k];
-                    uint16_t step  = dt * ember_speed[k] * speed_scale;
+                    uint16_t step  = (dt >> 2) * ember_speed[k] * speed_scale;
+                    if (step == 0) step = 1;
                     ember_phase16[k] += step;
 
                     if (ember_phase16[k] < old_p) {
                         ember_phase16[k] = 0;
                         if (next_ember_rand() < 135) {
-                            ember_speed[k] = (next_ember_rand() % 4) + 2;
+                            ember_speed[k] = (next_ember_rand() % 3) + 1;
                             ember_peak[k]  = 110 + (next_ember_rand() % 146);
                         } else {
                             ember_speed[k] = 0;
                         }
                     }
                 } else {
-                    if (next_ember_rand() < 3) {
+                    if (next_ember_rand() < 2) {
                         ember_phase16[k] = 0;
-                        ember_speed[k]   = (next_ember_rand() % 4) + 2;
+                        ember_speed[k]   = (next_ember_rand() % 3) + 1;
                         ember_peak[k]    = 110 + (next_ember_rand() % 146);
                     }
                 }
             }
         }
 
-        // Переводим выбранный в VIA цвет (HSV) в RGB
         RGB base_color = hsv_to_rgb(rgb_matrix_config.hsv);
 
         for (uint8_t i = led_min; i < led_max; i++) {
@@ -157,8 +235,8 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 
             uint8_t final_intensity = ember_val;
 
-            // Первые 3.2 секунды — "Каскадный розжиг"
-            if (boot_elapsed < 3200) {
+            // Если анимация загрузки включена (boot_anim_type > 0) и идут первые 3.2 секунды
+            if (boot_anim_type > 0 && boot_elapsed < 3200) {
                 if (boot_elapsed < 2300) {
                     if (boot_elapsed < ignite_delay[i]) {
                         final_intensity = 0;
