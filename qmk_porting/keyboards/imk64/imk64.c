@@ -67,8 +67,84 @@ led_config_t g_led_config = {
 };
 /* clang-format on */
 
+static bool     embers_initialized = false;
+static uint8_t  ember_phase[RGB_MATRIX_LED_COUNT];
+static uint8_t  ember_speed[RGB_MATRIX_LED_COUNT];
+static uint8_t  ember_peak[RGB_MATRIX_LED_COUNT];
+static uint16_t last_ember_tick = 0;
+static uint16_t ember_rng       = 0xACE1u;
+
+static uint8_t next_ember_rand(void) {
+    ember_rng = (ember_rng >> 1) ^ (-(ember_rng & 1u) & 0xB400u);
+    return (uint8_t)(ember_rng & 0xFFu);
+}
+
 bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 {
+    uint8_t mode = rgb_matrix_get_mode();
+
+    // Включаем эффект "Белые тлеющие угли" на первом режиме (Solid Color)
+    // и вместо всех реактивных режимов с клиньями (начиная с 30-го)
+    if (mode == 1 || mode >= 30) {
+        if (!embers_initialized) {
+            for (uint8_t i = 0; i < RGB_MATRIX_LED_COUNT; i++) {
+                ember_phase[i] = next_ember_rand();
+                // ~55% клавиш тлеют одновременно, остальные в темноте
+                ember_speed[i] = (next_ember_rand() < 140) ? ((next_ember_rand() % 3) + 1) : 0;
+                // Разная максимальная яркость для каждого уголька (от 100 до 255)
+                ember_peak[i]  = 100 + (next_ember_rand() % 156);
+            }
+            last_ember_tick    = timer_read();
+            embers_initialized = true;
+        }
+
+        uint16_t delay = ((uint16_t)(255 - rgb_matrix_config.speed) / 6) + 12;
+        if (timer_elapsed(last_ember_tick) > delay) {
+            last_ember_tick = timer_read();
+
+            for (uint8_t k = 0; k < RGB_MATRIX_LED_COUNT; k++) {
+                if (ember_speed[k] > 0) {
+                    uint8_t old_p = ember_phase[k];
+                    ember_phase[k] += ember_speed[k];
+
+                    // Когда клавиша плавно дотлела до нуля
+                    if (ember_phase[k] < old_p) {
+                        ember_phase[k] = 0;
+                        if (next_ember_rand() < 128) {
+                            ember_speed[k] = (next_ember_rand() % 3) + 1;
+                            ember_peak[k]  = 100 + (next_ember_rand() % 156);
+                        } else {
+                            ember_speed[k] = 0;
+                        }
+                    }
+                } else {
+                    // Потухшая клавиша с небольшим шансом начинает плавно разгораться
+                    if (next_ember_rand() < 8) {
+                        ember_phase[k] = 0;
+                        ember_speed[k] = (next_ember_rand() % 3) + 1;
+                        ember_peak[k]  = 100 + (next_ember_rand() % 156);
+                    }
+                }
+            }
+        }
+
+        uint8_t max_val = rgb_matrix_config.hsv.v;
+
+        for (uint8_t i = led_min; i < led_max; i++) {
+            uint8_t white = 0;
+            if (ember_speed[i] > 0) {
+                uint8_t p = ember_phase[i];
+                // Треугольная волна 0 -> 254 -> 0
+                uint8_t tri = (p & 0x80) ? (255 - ((p & 0x7F) << 1)) : ((p & 0x7F) << 1);
+                // Квадратичное сглаживание (гамма-кривая 2.0 для идеально мягкого тления)
+                uint8_t smooth = (uint8_t)(((uint16_t)tri * tri) >> 8);
+                uint8_t scaled = (uint8_t)(((uint16_t)smooth * ember_peak[i]) >> 8);
+                white          = (uint8_t)(((uint16_t)scaled * max_val) >> 8);
+            }
+            rgb_matrix_set_color(i, white, white, white);
+        }
+    }
+
     if (led_min <= 28 && led_max > 28 && host_keyboard_led_state().caps_lock) {
         RGB_MATRIX_INDICATOR_SET_COLOR(28, 0xFF, 0x00, 0x00);
     }
