@@ -51,7 +51,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #ifdef RGB_MATRIX_ENABLE
 #define RGB_MATRIX_CUSTOM_KB
-// #define RGB_MATRIX_DEFAULT_MODE RGB_MATRIX_SOLID_REACTIVE
+#define RGB_MATRIX_DEFAULT_MODE RGB_MATRIX_CUSTOM_STARRY_NIGHT
 #define RGBLED_NUM                    82
 #define RGB_MATRIX_LED_COUNT          RGBLED_NUM
 #define RGB_MATRIX_MAXIMUM_BRIGHTNESS 32
