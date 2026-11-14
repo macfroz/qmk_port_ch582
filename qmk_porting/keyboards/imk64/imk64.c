@@ -71,10 +71,7 @@ static bool     embers_initialized = false;
 static uint16_t ember_phase16[RGB_MATRIX_LED_COUNT];
 static uint8_t  ember_speed[RGB_MATRIX_LED_COUNT];
 static uint8_t  ember_peak[RGB_MATRIX_LED_COUNT];
-// Аккумуляторы дробной части яркости для Temporal Dithering (Дельта-Сигма сглаживания)
-static uint8_t  dither_r[RGB_MATRIX_LED_COUNT];
-static uint8_t  dither_g[RGB_MATRIX_LED_COUNT];
-static uint8_t  dither_b[RGB_MATRIX_LED_COUNT];
+static uint8_t  current_level[RGB_MATRIX_LED_COUNT];
 static uint16_t ignite_delay[RGB_MATRIX_LED_COUNT];
 static uint16_t last_ember_tick = 0;
 static uint32_t boot_start_time = 0;
@@ -133,10 +130,8 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
             for (uint8_t i = 0; i < RGB_MATRIX_LED_COUNT; i++) {
                 ember_phase16[i] = ((uint16_t)next_ember_rand() << 8) | next_ember_rand();
                 ember_speed[i]   = (next_ember_rand() < 140) ? ((next_ember_rand() % 3) + 1) : 0;
-                ember_peak[i]    = 100 + (next_ember_rand() % 156);
-                dither_r[i]      = next_ember_rand();
-                dither_g[i]      = dither_r[i];
-                dither_b[i]      = dither_r[i];
+                ember_peak[i]    = 110 + (next_ember_rand() % 146);
+                current_level[i] = 0;
             }
             boot_anim_type     = target_boot;
             init_ignite_delays(boot_anim_type);
@@ -153,40 +148,81 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 
         uint32_t boot_elapsed = timer_elapsed32(boot_start_time);
 
-        // Обновляем фазу на КАЖДОЙ миллисекунде (0 задержки между кадрами!)
-        uint16_t dt = timer_elapsed(last_ember_tick);
-        if (dt >= 1 && led_min == 0) {
-            last_ember_tick = timer_read();
-            if (dt > 30) dt = 30;
+        uint16_t max_val = (uint16_t)rgb_matrix_config.hsv.v * 3u;
+        if (max_val > 120u) max_val = 120u;
 
-            uint16_t speed_mult = 2 + (rgb_matrix_config.speed >> 4);
+        // Каждые 18 мс (~55 раз в секунду) плавно сдвигаем яркость каждого уголька ровно на 1 шаг (+1 или -1)
+        if (timer_elapsed(last_ember_tick) >= 18) {
+            last_ember_tick = timer_read();
+
+            uint16_t speed_mult = 28 + ((uint16_t)rgb_matrix_config.speed >> 1);
 
             for (uint8_t k = 0; k < RGB_MATRIX_LED_COUNT; k++) {
                 if (ember_speed[k] > 0) {
                     uint16_t old_p = ember_phase16[k];
-                    ember_phase16[k] += dt * ember_speed[k] * speed_mult;
+                    ember_phase16[k] += (uint16_t)ember_speed[k] * speed_mult;
 
                     if (ember_phase16[k] < old_p) {
                         ember_phase16[k] = 0;
                         if (next_ember_rand() < 128) {
                             ember_speed[k] = (next_ember_rand() % 3) + 1;
-                            ember_peak[k]  = 100 + (next_ember_rand() % 156);
+                            ember_peak[k]  = 110 + (next_ember_rand() % 146);
                         } else {
                             ember_speed[k] = 0;
                         }
                     }
                 } else {
-                    if (next_ember_rand() < 2) {
+                    if (next_ember_rand() < 3) {
                         ember_phase16[k] = 0;
                         ember_speed[k]   = (next_ember_rand() % 3) + 1;
-                        ember_peak[k]    = 100 + (next_ember_rand() % 156);
+                        ember_peak[k]    = 110 + (next_ember_rand() % 146);
+                    }
+                }
+
+                // Вычисляем целевую яркость уголька
+                uint8_t scaled = 0;
+                if (ember_speed[k] > 0) {
+                    uint16_t half   = (ember_phase16[k] & 0x8000u) ? (65535u - ember_phase16[k]) : ember_phase16[k];
+                    uint16_t x      = half >> 7; // 0..255
+                    uint16_t x2     = (x * x) >> 8;
+                    uint16_t smooth = (x2 * (765u - (x << 1))) >> 8;
+                    scaled          = (uint8_t)((smooth * ember_peak[k]) >> 8);
+                }
+
+                uint8_t final_intensity = scaled;
+
+                if (boot_anim_type > 0 && boot_elapsed < 3200) {
+                    if (boot_elapsed < 2300) {
+                        if (boot_elapsed < ignite_delay[k]) {
+                            final_intensity = 0;
+                        } else {
+                            uint32_t t_on = boot_elapsed - ignite_delay[k];
+                            if (t_on < 450) {
+                                uint8_t ramp    = (uint8_t)((t_on * 255UL) / 450UL);
+                                final_intensity = (uint8_t)(((uint16_t)ramp * ramp) >> 8);
+                            } else {
+                                final_intensity = 255;
+                            }
+                        }
+                    } else {
+                        uint32_t fade_t  = boot_elapsed - 2300;
+                        uint8_t  ember_w = (uint8_t)((fade_t * 255UL) / 900UL);
+                        uint8_t  boot_w  = 255 - ember_w;
+                        final_intensity  = (uint8_t)(((uint16_t)255 * boot_w + (uint16_t)scaled * ember_w) >> 8);
+                    }
+                    // Во время быстрой загрузочной анимации разрешаем прямое следование
+                    current_level[k] = (uint8_t)(((uint16_t)final_intensity * max_val) >> 8);
+                } else {
+                    // В режиме тления углей яркость скользит к цели СТРОГО по 1 ступеньке (+1 или -1) без прыжков и миганий!
+                    uint8_t target_level = (uint8_t)(((uint16_t)final_intensity * max_val) >> 8);
+                    if (current_level[k] < target_level) {
+                        current_level[k]++;
+                    } else if (current_level[k] > target_level) {
+                        current_level[k]--;
                     }
                 }
             }
         }
-
-        uint16_t max_val = (uint16_t)rgb_matrix_config.hsv.v * 3u;
-        if (max_val > 120u) max_val = 120u;
 
         HSV full_hsv = rgb_matrix_config.hsv;
         if (full_hsv.s < 32) {
@@ -196,56 +232,15 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
         RGB pure_color = hsv_to_rgb(full_hsv);
 
         for (uint8_t i = led_min; i < led_max; i++) {
-            // Вычисляем 16-битную кривую яркости (0..65535) без потери точности!
-            uint32_t smooth16 = 0;
-            if (ember_speed[i] > 0) {
-                uint32_t tri16 = (ember_phase16[i] & 0x8000u) ? ((65535UL - ember_phase16[i]) << 1) : ((uint32_t)ember_phase16[i] << 1);
-                if (tri16 > 65535UL) tri16 = 65535UL;
-                uint32_t sq = (tri16 * tri16) >> 16; // 0..65535
-                smooth16    = (sq * ember_peak[i]) >> 8; // 0..65535
-            }
-
-            if (boot_anim_type > 0 && boot_elapsed < 3200) {
-                if (boot_elapsed < 2300) {
-                    if (boot_elapsed < ignite_delay[i]) {
-                        smooth16 = 0;
-                    } else {
-                        uint32_t t_on = boot_elapsed - ignite_delay[i];
-                        if (t_on < 450) {
-                            uint32_t ramp16 = (t_on * 65535UL) / 450UL;
-                            smooth16        = (ramp16 * ramp16) >> 16;
-                        } else {
-                            smooth16 = 65535UL;
-                        }
-                    }
-                } else {
-                    uint32_t fade_t  = boot_elapsed - 2300;
-                    uint32_t ember_w = (fade_t * 256UL) / 900UL;
-                    uint32_t boot_w  = 256UL - ember_w;
-                    smooth16         = (65535UL * boot_w + smooth16 * ember_w) >> 8;
-                }
-            }
-
-            // Точное 16-битное значение яркости (верхние 8 бит — целая яркость, нижние 8 бит — дробная!)
-            uint32_t exact16 = (smooth16 * max_val) >> 8;
+            uint8_t level = current_level[i];
 
             if (full_hsv.s == 0) {
-                // Дельта-Сигма сглаживание (Temporal Dithering) для чистого белого:
-                uint32_t accum = exact16 + dither_r[i];
-                dither_r[i]    = (uint8_t)(accum & 0xFFu);
-                uint8_t level  = (uint8_t)(accum >> 8);
                 rgb_matrix_set_color(i, level, level, level);
             } else {
-                // Дельта-Сигма сглаживание отдельно для R, G, B каналов:
-                uint32_t acc_r = ((exact16 * pure_color.r) >> 8) + dither_r[i];
-                uint32_t acc_g = ((exact16 * pure_color.g) >> 8) + dither_g[i];
-                uint32_t acc_b = ((exact16 * pure_color.b) >> 8) + dither_b[i];
-
-                dither_r[i] = (uint8_t)(acc_r & 0xFFu);
-                dither_g[i] = (uint8_t)(acc_g & 0xFFu);
-                dither_b[i] = (uint8_t)(acc_b & 0xFFu);
-
-                rgb_matrix_set_color(i, (uint8_t)(acc_r >> 8), (uint8_t)(acc_g >> 8), (uint8_t)(acc_b >> 8));
+                uint8_t r = (uint8_t)(((uint16_t)pure_color.r * level) >> 8);
+                uint8_t g = (uint8_t)(((uint16_t)pure_color.g * level) >> 8);
+                uint8_t b = (uint8_t)(((uint16_t)pure_color.b * level) >> 8);
+                rgb_matrix_set_color(i, r, g, b);
             }
         }
     }
