@@ -71,19 +71,12 @@ static bool     embers_initialized = false;
 static uint16_t ember_phase16[RGB_MATRIX_LED_COUNT];
 static uint8_t  ember_speed[RGB_MATRIX_LED_COUNT];
 static uint8_t  ember_peak[RGB_MATRIX_LED_COUNT];
-static uint8_t  current_level[RGB_MATRIX_LED_COUNT];
 static uint16_t ignite_delay[RGB_MATRIX_LED_COUNT];
 static uint16_t last_ember_tick = 0;
 static uint32_t boot_start_time = 0;
 static uint16_t ember_rng       = 0xACE1u;
 static uint8_t  boot_anim_type  = 1;
 static uint8_t  last_seen_mode  = 0xFF;
-
-// Переменные для отслеживания нажатия Caps Lock и запуска синей ряби
-static bool     caps_ripple_init   = false;
-static bool     last_caps_state    = false;
-static bool     caps_ripple_active = false;
-static uint32_t caps_ripple_start  = 0;
 
 static uint8_t next_ember_rand(void) {
     ember_rng = (ember_rng >> 1) ^ (-(ember_rng & 1u) & 0xB400u);
@@ -122,21 +115,7 @@ static void init_ignite_delays(uint8_t anim_type) {
 
 bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 {
-    uint8_t mode       = rgb_matrix_get_mode();
-    bool    caps_state = host_keyboard_led_state().caps_lock;
-
-    // Отслеживаем момент нажатия Caps Lock (смену состояния), чтобы пустить синюю рябь!
-    if (!caps_ripple_init) {
-        last_caps_state  = caps_state;
-        caps_ripple_init = true;
-    } else if (caps_state != last_caps_state) {
-        last_caps_state    = caps_state;
-        caps_ripple_active = true;
-        caps_ripple_start  = timer_read32();
-    }
-
-    uint16_t max_val = (uint16_t)rgb_matrix_config.hsv.v * 3u;
-    if (max_val > 120u) max_val = 120u;
+    uint8_t mode = rgb_matrix_get_mode();
 
     if (mode == 1 || mode >= 30) {
         uint8_t target_boot = 1;
@@ -149,9 +128,8 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
         if (!embers_initialized) {
             for (uint8_t i = 0; i < RGB_MATRIX_LED_COUNT; i++) {
                 ember_phase16[i] = ((uint16_t)next_ember_rand() << 8) | next_ember_rand();
-                ember_speed[i]   = (next_ember_rand() < 140) ? ((next_ember_rand() % 3) + 1) : 0;
-                ember_peak[i]    = 110 + (next_ember_rand() % 146);
-                current_level[i] = 0;
+                ember_speed[i]   = (next_ember_rand() < 150) ? ((next_ember_rand() % 3) + 2) : 0;
+                ember_peak[i]    = 130 + (next_ember_rand() % 126);
             }
             boot_anim_type     = target_boot;
             init_ignite_delays(boot_anim_type);
@@ -168,21 +146,25 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 
         uint32_t boot_elapsed = timer_elapsed32(boot_start_time);
 
-        if (timer_elapsed(last_ember_tick) >= 18) {
+        // Обновляем 16-битную фазу строго по реальному миллисекундному таймеру (каждые 4 мс)
+        uint16_t dt = timer_elapsed(last_ember_tick);
+        if (dt >= 4) {
             last_ember_tick = timer_read();
+            if (dt > 40) dt = 40;
 
-            uint16_t speed_mult = 28 + ((uint16_t)rgb_matrix_config.speed >> 1);
+            // Плавная регулировка скорости: от неспешного дыхания на минимуме до живого мерцания
+            uint16_t speed_mult = 2 + (rgb_matrix_config.speed >> 4);
 
             for (uint8_t k = 0; k < RGB_MATRIX_LED_COUNT; k++) {
                 if (ember_speed[k] > 0) {
                     uint16_t old_p = ember_phase16[k];
-                    ember_phase16[k] += (uint16_t)ember_speed[k] * speed_mult;
+                    ember_phase16[k] += dt * ember_speed[k] * speed_mult;
 
                     if (ember_phase16[k] < old_p) {
                         ember_phase16[k] = 0;
-                        if (next_ember_rand() < 128) {
-                            ember_speed[k] = (next_ember_rand() % 3) + 1;
-                            ember_peak[k]  = 110 + (next_ember_rand() % 146);
+                        if (next_ember_rand() < 140) {
+                            ember_speed[k] = (next_ember_rand() % 3) + 2;
+                            ember_peak[k]  = 130 + (next_ember_rand() % 126);
                         } else {
                             ember_speed[k] = 0;
                         }
@@ -190,51 +172,19 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
                 } else {
                     if (next_ember_rand() < 3) {
                         ember_phase16[k] = 0;
-                        ember_speed[k]   = (next_ember_rand() % 3) + 1;
-                        ember_peak[k]    = 110 + (next_ember_rand() % 146);
-                    }
-                }
-
-                uint8_t scaled = 0;
-                if (ember_speed[k] > 0) {
-                    uint16_t half   = (ember_phase16[k] & 0x8000u) ? (65535u - ember_phase16[k]) : ember_phase16[k];
-                    uint16_t x      = half >> 7;
-                    uint16_t x2     = (x * x) >> 8;
-                    uint16_t smooth = (x2 * (765u - (x << 1))) >> 8;
-                    scaled          = (uint8_t)((smooth * ember_peak[k]) >> 8);
-                }
-
-                uint8_t final_intensity = scaled;
-
-                if (boot_anim_type > 0 && boot_elapsed < 3200) {
-                    if (boot_elapsed < 2300) {
-                        if (boot_elapsed < ignite_delay[k]) {
-                            final_intensity = 0;
-                        } else {
-                            uint32_t t_on = boot_elapsed - ignite_delay[k];
-                            if (t_on < 450) {
-                                uint8_t ramp    = (uint8_t)((t_on * 255UL) / 450UL);
-                                final_intensity = (uint8_t)(((uint16_t)ramp * ramp) >> 8);
-                            } else {
-                                final_intensity = 255;
-                            }
-                        }
-                    } else {
-                        uint32_t fade_t  = boot_elapsed - 2300;
-                        uint8_t  ember_w = (uint8_t)((fade_t * 255UL) / 900UL);
-                        uint8_t  boot_w  = 255 - ember_w;
-                        final_intensity  = (uint8_t)(((uint16_t)255 * boot_w + (uint16_t)scaled * ember_w) >> 8);
-                    }
-                    current_level[k] = (uint8_t)(((uint16_t)final_intensity * max_val) >> 8);
-                } else {
-                    uint8_t target_level = (uint8_t)(((uint16_t)final_intensity * max_val) >> 8);
-                    if (current_level[k] < target_level) {
-                        current_level[k]++;
-                    } else if (current_level[k] > target_level) {
-                        current_level[k]--;
+                        ember_speed[k]   = (next_ember_rand() % 3) + 2;
+                        ember_peak[k]    = 130 + (next_ember_rand() % 126);
                     }
                 }
             }
+        }
+
+        // Благодаря RGB_MATRIX_MAXIMUM_BRIGHTNESS = 180 в qmk_config.h,
+        // max_val теперь имеет до 180 реальных аппаратных градаций яркости!
+        uint16_t max_val = rgb_matrix_config.hsv.v;
+        // Если в памяти клавиатуры остался старый низкий предел (<= 32), мягко поднимаем его до 140 ступенек:
+        if (max_val > 0 && max_val <= 32) {
+            max_val = max_val * 4u;
         }
 
         HSV full_hsv = rgb_matrix_config.hsv;
@@ -245,7 +195,43 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
         RGB pure_color = hsv_to_rgb(full_hsv);
 
         for (uint8_t i = led_min; i < led_max; i++) {
-            uint8_t level = current_level[i];
+            uint16_t smooth16 = 0;
+            if (ember_speed[i] > 0) {
+                // Высокоточная 16-битная треугольная волна (0..32767 -> 0..65534)
+                uint32_t half = (ember_phase16[i] & 0x8000u) ? (65535UL - ember_phase16[i]) : ember_phase16[i];
+                uint32_t x    = half >> 7; // 0..255
+                // Плавная синусоидальная S-кривая (Smoothstep: 3x^2 - 2x^3) без резких углов и застреваний на нуле!
+                uint32_t x2   = (x * x) >> 8;
+                uint32_t s_curve = (x2 * (765UL - (x << 1))) >> 8; // 0..255
+                // Мягкая гамма 1.5 (среднее между линейной и квадратичной — не "съедает" нижние ступеньки!)
+                uint32_t soft_gamma = (s_curve * (128UL + (s_curve >> 1))) >> 8;
+                smooth16 = (uint16_t)((soft_gamma * ember_peak[i]) >> 8);
+            }
+
+            uint16_t final_intensity = smooth16;
+
+            if (boot_anim_type > 0 && boot_elapsed < 3200) {
+                if (boot_elapsed < 2300) {
+                    if (boot_elapsed < ignite_delay[i]) {
+                        final_intensity = 0;
+                    } else {
+                        uint32_t t_on = boot_elapsed - ignite_delay[i];
+                        if (t_on < 450) {
+                            uint16_t ramp   = (uint16_t)((t_on * 255UL) / 450UL);
+                            final_intensity = (ramp * ramp) >> 8;
+                        } else {
+                            final_intensity = 255;
+                        }
+                    }
+                } else {
+                    uint32_t fade_t  = boot_elapsed - 2300;
+                    uint16_t ember_w = (uint16_t)((fade_t * 255UL) / 900UL);
+                    uint16_t boot_w  = 255u - ember_w;
+                    final_intensity  = (255u * boot_w + smooth16 * ember_w) >> 8;
+                }
+            }
+
+            uint8_t level = (uint8_t)(((uint32_t)final_intensity * max_val) >> 8);
 
             if (full_hsv.s == 0) {
                 rgb_matrix_set_color(i, level, level, level);
@@ -258,47 +244,8 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
         }
     }
 
-    // Отрисовка круговой ярко-синей ряби от клавиши Caps Lock (x=0, y=32) при её нажатии!
-    if (caps_ripple_active) {
-        uint32_t rip_elapsed = timer_elapsed32(caps_ripple_start);
-        if (rip_elapsed < 850) {
-            // Радиус волны пробегает от 0 до 270 единиц за 850 мс
-            int16_t wave_radius = (int16_t)((rip_elapsed * 270UL) / 850UL);
-            // По мере приближения к правому краю клавиатуры волна мягко затухает
-            uint8_t wave_fade   = (uint8_t)(255UL - ((rip_elapsed * 200UL) / 850UL));
-
-            for (uint8_t i = led_min; i < led_max; i++) {
-                if (i < 64) {
-                    int16_t dx = (int16_t)g_led_config.point[i].x; // Расстояние от левого края (Caps Lock X = 0)
-                    int16_t dy = (int16_t)g_led_config.point[i].y - 32; // Расстояние по вертикали (Caps Lock Y = 32)
-                    if (dy < 0) dy = -dy;
-
-                    // Приближённое круговое расстояние от клавиши Caps Lock
-                    int16_t dist = dx + dy;
-                    int16_t diff = dist - wave_radius;
-                    if (diff < 0) diff = -diff;
-
-                    // Ширина кольца синей ряби = 45 единиц
-                    if (diff < 45) {
-                        uint8_t ring      = (uint8_t)(255 - (diff * 5));
-                        uint8_t rip_str   = (uint8_t)(((uint16_t)ring * wave_fade) >> 8);
-                        uint8_t blue_val  = (uint8_t)(((uint16_t)rip_str * max_val) >> 8);
-                        uint8_t cyan_hint = blue_val >> 2; // Лёгкий неоновый оттенок на гребне волны
-
-                        rgb_matrix_set_color(i, 0, cyan_hint, blue_val);
-                    }
-                }
-            }
-        } else {
-            caps_ripple_active = false;
-        }
-    }
-
-    // Сама клавиша Caps Lock (№28) при включённом режиме горит насыщенным ярко-синим цветом!
-    if (led_min <= 28 && led_max > 28 && caps_state) {
-        uint8_t cap_b = (uint8_t)max_val;
-        uint8_t cap_g = cap_b >> 3;
-        RGB_MATRIX_INDICATOR_SET_COLOR(28, 0x00, cap_g, cap_b);
+    if (led_min <= 28 && led_max > 28 && host_keyboard_led_state().caps_lock) {
+        RGB_MATRIX_INDICATOR_SET_COLOR(28, 0xFF, 0x00, 0x00);
     }
 
     return true;
