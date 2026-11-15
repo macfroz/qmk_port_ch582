@@ -53,11 +53,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define RGB_MATRIX_DEFAULT_MODE       RGB_MATRIX_SOLID_COLOR
 #define RGBLED_NUM                    82
 #define RGB_MATRIX_LED_COUNT          RGBLED_NUM
-#define RGB_MATRIX_MAXIMUM_BRIGHTNESS 64
-#define RGB_MATRIX_STARTUP_VAL        RGB_MATRIX_MAXIMUM_BRIGHTNESS
+#define RGB_MATRIX_MAXIMUM_BRIGHTNESS 180
+#define RGB_MATRIX_STARTUP_VAL        120
 #define RGB_MATRIX_HUE_STEP           10
 #define RGB_MATRIX_SAT_STEP           8
-#define RGB_MATRIX_VAL_STEP           4
+#define RGB_MATRIX_VAL_STEP           8
 #define RGB_MATRIX_SPD_STEP           10
 #define RGB_MATRIX_SLEEP
 #define ENABLE_RGB_MATRIX_ALPHAS_MODS
@@ -108,8 +108,4 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define AUXILIARY_RGB_USE_UNIVERSAL_BRIGHTNESS
 #endif
 
-/* define if matrix has ghost */
-// #define MATRIX_HAS_GHOST
-
-/* Set 0 if debouncing isn't needed */
 #define DEBOUNCE 5
