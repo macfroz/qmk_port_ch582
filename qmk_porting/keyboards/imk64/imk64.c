@@ -79,6 +79,12 @@ static uint16_t ember_rng       = 0xACE1u;
 static uint8_t  boot_anim_type  = 1;
 static uint8_t  last_seen_mode  = 0xFF;
 
+// Переменные для отслеживания нажатия Caps Lock и запуска синей ряби
+static bool     caps_ripple_init   = false;
+static bool     last_caps_state    = false;
+static bool     caps_ripple_active = false;
+static uint32_t caps_ripple_start  = 0;
+
 static uint8_t next_ember_rand(void) {
     ember_rng = (ember_rng >> 1) ^ (-(ember_rng & 1u) & 0xB400u);
     return (uint8_t)(ember_rng & 0xFFu);
@@ -116,7 +122,21 @@ static void init_ignite_delays(uint8_t anim_type) {
 
 bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 {
-    uint8_t mode = rgb_matrix_get_mode();
+    uint8_t mode       = rgb_matrix_get_mode();
+    bool    caps_state = host_keyboard_led_state().caps_lock;
+
+    // Отслеживаем момент нажатия Caps Lock (смену состояния), чтобы пустить синюю рябь!
+    if (!caps_ripple_init) {
+        last_caps_state  = caps_state;
+        caps_ripple_init = true;
+    } else if (caps_state != last_caps_state) {
+        last_caps_state    = caps_state;
+        caps_ripple_active = true;
+        caps_ripple_start  = timer_read32();
+    }
+
+    uint16_t max_val = (uint16_t)rgb_matrix_config.hsv.v * 3u;
+    if (max_val > 120u) max_val = 120u;
 
     if (mode == 1 || mode >= 30) {
         uint8_t target_boot = 1;
@@ -148,10 +168,6 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
 
         uint32_t boot_elapsed = timer_elapsed32(boot_start_time);
 
-        uint16_t max_val = (uint16_t)rgb_matrix_config.hsv.v * 3u;
-        if (max_val > 120u) max_val = 120u;
-
-        // Каждые 18 мс (~55 раз в секунду) плавно сдвигаем яркость каждого уголька ровно на 1 шаг (+1 или -1)
         if (timer_elapsed(last_ember_tick) >= 18) {
             last_ember_tick = timer_read();
 
@@ -179,11 +195,10 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
                     }
                 }
 
-                // Вычисляем целевую яркость уголька
                 uint8_t scaled = 0;
                 if (ember_speed[k] > 0) {
                     uint16_t half   = (ember_phase16[k] & 0x8000u) ? (65535u - ember_phase16[k]) : ember_phase16[k];
-                    uint16_t x      = half >> 7; // 0..255
+                    uint16_t x      = half >> 7;
                     uint16_t x2     = (x * x) >> 8;
                     uint16_t smooth = (x2 * (765u - (x << 1))) >> 8;
                     scaled          = (uint8_t)((smooth * ember_peak[k]) >> 8);
@@ -210,10 +225,8 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
                         uint8_t  boot_w  = 255 - ember_w;
                         final_intensity  = (uint8_t)(((uint16_t)255 * boot_w + (uint16_t)scaled * ember_w) >> 8);
                     }
-                    // Во время быстрой загрузочной анимации разрешаем прямое следование
                     current_level[k] = (uint8_t)(((uint16_t)final_intensity * max_val) >> 8);
                 } else {
-                    // В режиме тления углей яркость скользит к цели СТРОГО по 1 ступеньке (+1 или -1) без прыжков и миганий!
                     uint8_t target_level = (uint8_t)(((uint16_t)final_intensity * max_val) >> 8);
                     if (current_level[k] < target_level) {
                         current_level[k]++;
@@ -245,8 +258,47 @@ bool rgb_matrix_indicators_advanced_user(uint8_t led_min, uint8_t led_max)
         }
     }
 
-    if (led_min <= 28 && led_max > 28 && host_keyboard_led_state().caps_lock) {
-        RGB_MATRIX_INDICATOR_SET_COLOR(28, 0xFF, 0x00, 0x00);
+    // Отрисовка круговой ярко-синей ряби от клавиши Caps Lock (x=0, y=32) при её нажатии!
+    if (caps_ripple_active) {
+        uint32_t rip_elapsed = timer_elapsed32(caps_ripple_start);
+        if (rip_elapsed < 850) {
+            // Радиус волны пробегает от 0 до 270 единиц за 850 мс
+            int16_t wave_radius = (int16_t)((rip_elapsed * 270UL) / 850UL);
+            // По мере приближения к правому краю клавиатуры волна мягко затухает
+            uint8_t wave_fade   = (uint8_t)(255UL - ((rip_elapsed * 200UL) / 850UL));
+
+            for (uint8_t i = led_min; i < led_max; i++) {
+                if (i < 64) {
+                    int16_t dx = (int16_t)g_led_config.point[i].x; // Расстояние от левого края (Caps Lock X = 0)
+                    int16_t dy = (int16_t)g_led_config.point[i].y - 32; // Расстояние по вертикали (Caps Lock Y = 32)
+                    if (dy < 0) dy = -dy;
+
+                    // Приближённое круговое расстояние от клавиши Caps Lock
+                    int16_t dist = dx + dy;
+                    int16_t diff = dist - wave_radius;
+                    if (diff < 0) diff = -diff;
+
+                    // Ширина кольца синей ряби = 45 единиц
+                    if (diff < 45) {
+                        uint8_t ring      = (uint8_t)(255 - (diff * 5));
+                        uint8_t rip_str   = (uint8_t)(((uint16_t)ring * wave_fade) >> 8);
+                        uint8_t blue_val  = (uint8_t)(((uint16_t)rip_str * max_val) >> 8);
+                        uint8_t cyan_hint = blue_val >> 2; // Лёгкий неоновый оттенок на гребне волны
+
+                        rgb_matrix_set_color(i, 0, cyan_hint, blue_val);
+                    }
+                }
+            }
+        } else {
+            caps_ripple_active = false;
+        }
+    }
+
+    // Сама клавиша Caps Lock (№28) при включённом режиме горит насыщенным ярко-синим цветом!
+    if (led_min <= 28 && led_max > 28 && caps_state) {
+        uint8_t cap_b = (uint8_t)max_val;
+        uint8_t cap_g = cap_b >> 3;
+        RGB_MATRIX_INDICATOR_SET_COLOR(28, 0x00, cap_g, cap_b);
     }
 
     return true;
